@@ -1,34 +1,59 @@
-'''
-# Time   : 2020/10/22 11:15
-# Author : junchaoli
-# File   : model.py
-'''
-from layer import FM_layer, Dense_layer
+from __future__ import annotations
 
-import tensorflow as tf
-from tensorflow.keras import Model
-from tensorflow.keras.layers import Embedding
+import torch
+from torch import nn
 
-class DeepFM(Model):
-    def __init__(self, feature_columns, k, w_reg, v_reg, hidden_units, output_dim, activation):
+try:
+    from .layer import FactorizationMachine, FeaturesEmbedding, FeaturesLinear, MLP
+except ImportError:
+    from layer import FactorizationMachine, FeaturesEmbedding, FeaturesLinear, MLP
+
+
+class DeepFM(nn.Module):
+    def __init__(
+        self,
+        dense_feature_dim: int,
+        sparse_cardinalities: list[int],
+        embed_dim: int,
+        hidden_units: list[int],
+        dropout: float = 0.0,
+    ) -> None:
         super().__init__()
-        self.dense_feature_columns, self.sparse_feature_columns = feature_columns
-        self.embed_layers = {
-            'embed_' + str(i): Embedding(feat['feat_onehot_dim'], feat['embed_dim'])
-             for i, feat in enumerate(self.sparse_feature_columns)
-        }
-        
-        self.FM = FM_layer(k, w_reg, v_reg)
-        self.Dense = Dense_layer(hidden_units, output_dim, activation)
+        self.dense_feature_dim = dense_feature_dim
+        self.sparse_feature_dim = len(sparse_cardinalities)
+        self.embed_dim = embed_dim
 
-    def call(self, inputs):
-        dense_inputs, sparse_inputs = inputs[:, :13], inputs[:, 13:]
-        # embedding
-        sparse_embed = tf.concat([self.embed_layers['embed_{}'.format(i)](sparse_inputs[:, i])
-                                  for i in range(sparse_inputs.shape[1])], axis=1)
-        x = tf.concat([dense_inputs, sparse_embed], axis=-1)
+        self.linear = FeaturesLinear(sparse_cardinalities, dense_feature_dim)
+        self.fm = FactorizationMachine()
+        self.sparse_embedding = FeaturesEmbedding(sparse_cardinalities, embed_dim) if sparse_cardinalities else None
+        self.dense_embedding = (
+            nn.Parameter(torch.empty(dense_feature_dim, embed_dim)) if dense_feature_dim > 0 else None
+        )
+        if self.dense_embedding is not None:
+            nn.init.xavier_uniform_(self.dense_embedding)
 
-        fm_output = self.FM(x)
-        dense_output = self.Dense(x)
-        output = tf.nn.sigmoid(0.5*(fm_output + dense_output))
-        return output
+        mlp_input_dim = dense_feature_dim + self.sparse_feature_dim * embed_dim
+        self.mlp = MLP(mlp_input_dim, hidden_units, dropout)
+
+    def forward(self, dense_x: torch.Tensor, sparse_x: torch.Tensor) -> torch.Tensor:
+        linear_term = self.linear(dense_x, sparse_x)
+
+        fm_parts = []
+        sparse_emb = None
+        if self.sparse_embedding is not None and sparse_x.numel() > 0:
+            sparse_emb = self.sparse_embedding(sparse_x)
+            fm_parts.append(sparse_emb)
+        if self.dense_embedding is not None and dense_x.numel() > 0:
+            dense_emb = dense_x.unsqueeze(-1) * self.dense_embedding.unsqueeze(0)
+            fm_parts.append(dense_emb)
+
+        fm_term = self.fm(torch.cat(fm_parts, dim=1)) if fm_parts else torch.zeros_like(linear_term)
+
+        deep_parts = []
+        if dense_x.numel() > 0:
+            deep_parts.append(dense_x)
+        if sparse_emb is not None:
+            deep_parts.append(sparse_emb.flatten(start_dim=1))
+        deep_input = torch.cat(deep_parts, dim=1) if deep_parts else torch.zeros_like(linear_term)
+        deep_term = self.mlp(deep_input)
+        return linear_term + fm_term + deep_term
