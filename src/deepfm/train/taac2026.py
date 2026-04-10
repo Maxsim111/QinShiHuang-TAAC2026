@@ -1,71 +1,18 @@
 from __future__ import annotations
 
-import argparse
 import json
-import os
-import random
-import sys
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-import yaml
 
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train PyTorch DeepFM on the TAAC2026 sample dataset.")
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=str(Path(__file__).resolve().parent / "configs" / "default.yaml"),
-        help="Path to the training config yaml.",
-    )
-    parser.add_argument("--prepare-only", action="store_true", help="Only generate intermediate features.")
-    parser.add_argument("--force-prepare", action="store_true", help="Rebuild cached features before training.")
-    return parser.parse_args()
-
-
-def load_config(config_path: Path) -> dict[str, Any]:
-    with config_path.open("r", encoding="utf-8") as file:
-        return yaml.safe_load(file)
-
-
-def resolve_workspace_path(repo_root: Path, raw_path: str) -> Path:
-    path = Path(raw_path)
-    return path if path.is_absolute() else (repo_root.parent / path).resolve()
-
-
-def set_runtime_environment(config: dict[str, Any]) -> None:
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(config["device"]["cuda_visible_devices"])
-    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-
-
-def seed_everything(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    import torch
-
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
-
-def validate_device(config: dict[str, Any]) -> "torch.device":
-    import torch
-
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is unavailable. This pipeline is configured to run on the RTX 5090D only.")
-    if torch.cuda.device_count() != 1:
-        raise RuntimeError(f"Expected exactly one visible GPU after masking, found {torch.cuda.device_count()}.")
-    device_name = torch.cuda.get_device_name(0)
-    expected_keyword = str(config["device"]["required_device_keyword"])
-    if expected_keyword not in device_name:
-        raise RuntimeError(f"Visible GPU is '{device_name}', expected it to contain '{expected_keyword}'.")
-    print(f"Using device: cuda:0 ({device_name})")
-    return torch.device("cuda:0")
+from deepfm.common.runtime import resolve_workspace_path
+from deepfm.eval.classification import format_metrics
+from deepfm.models import DeepFM
 
 
 def maybe_prepare_features(config: dict[str, Any], repo_root: Path, force_prepare: bool) -> dict[str, Any]:
-    from DeepFM.utils import load_feature_schema, prepare_taac2026_dataset
+    from deepfm.data.taac2026 import load_feature_schema, prepare_taac2026_dataset
 
     feature_dir = resolve_workspace_path(repo_root, config["paths"]["feature_dir"])
     schema_path = feature_dir / "feature_schema.yaml"
@@ -76,9 +23,9 @@ def maybe_prepare_features(config: dict[str, Any], repo_root: Path, force_prepar
     return load_feature_schema(feature_dir)
 
 
-def create_dataloaders(schema: dict[str, Any], config: dict[str, Any], repo_root: Path) -> dict[str, Any]:
+def create_data_objects(schema: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     from torch.utils.data import DataLoader
-    from DeepFM.utils import ParquetDataset
+    from deepfm.data.taac2026 import ParquetDataset
 
     batch_size = int(config["training"]["batch_size"])
     num_workers = int(config["training"].get("num_workers", 0))
@@ -105,22 +52,11 @@ def create_dataloaders(schema: dict[str, Any], config: dict[str, Any], repo_root
             pin_memory=True,
         ),
     }
-    print(
-        "Dataset summary:",
-        json.dumps(
-            {
-                split: len(dataset)
-                for split, dataset in datasets.items()
-            },
-            ensure_ascii=False,
-        ),
-    )
+    print("Dataset summary:", json.dumps({split: len(dataset) for split, dataset in datasets.items()}, ensure_ascii=False))
     return {"datasets": datasets, "loaders": loaders}
 
 
 def instantiate_model(schema: dict[str, Any], config: dict[str, Any], device: "torch.device") -> "torch.nn.Module":
-    from DeepFM.model import DeepFM
-
     sparse_cardinalities = [schema["sparse_cardinalities"][feature] for feature in schema["sparse_features"]]
     model = DeepFM(
         dense_feature_dim=len(schema["dense_features"]),
@@ -132,9 +68,9 @@ def instantiate_model(schema: dict[str, Any], config: dict[str, Any], device: "t
     return model.to(device)
 
 
-def evaluate(model: "torch.nn.Module", data_loader: Any, device: "torch.device") -> tuple[float, dict[str, float]]:
+def evaluate_model(model: "torch.nn.Module", data_loader: Any, device: "torch.device") -> tuple[float, dict[str, float]]:
     import torch
-    from DeepFM.utils import compute_classification_metrics
+    from deepfm.eval.classification import compute_classification_metrics
 
     criterion = torch.nn.BCEWithLogitsLoss()
     model.eval()
@@ -151,7 +87,7 @@ def evaluate(model: "torch.nn.Module", data_loader: Any, device: "torch.device")
             loss = criterion(logits, labels)
             probabilities = torch.sigmoid(logits)
 
-            losses.append(loss.item())
+            losses.append(float(loss.item()))
             all_labels.append(labels.squeeze(1).cpu().numpy())
             all_probs.append(probabilities.squeeze(1).cpu().numpy())
     metrics = compute_classification_metrics(np.concatenate(all_labels), np.concatenate(all_probs))
@@ -172,17 +108,37 @@ def build_training_criterion(training_config: dict[str, Any], labels: np.ndarray
     return torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
 
-def train_model(
-    model: "torch.nn.Module",
-    schema: dict[str, Any],
+def run_training(
     config: dict[str, Any],
-    data_objects: dict[str, Any],
-    device: "torch.device",
     repo_root: Path,
-) -> None:
+    device: "torch.device",
+    *,
+    prepare_only: bool = False,
+    force_prepare: bool = False,
+) -> dict[str, Any]:
     import torch
     from torch.utils.tensorboard import SummaryWriter
-    from DeepFM.utils import format_metrics
+
+    schema = maybe_prepare_features(config, repo_root, force_prepare)
+    print(
+        json.dumps(
+            {
+                "raw_data": config["paths"]["raw_data"],
+                "target_action_type": config["data"]["target_action_type"],
+                "num_dense_features": len(schema["dense_features"]),
+                "num_sparse_features": len(schema["sparse_features"]),
+                "embed_dim": config["training"]["embed_dim"],
+                "hidden_units": config["training"]["hidden_units"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    if prepare_only:
+        return {"schema": schema, "prepared_only": True}
+
+    data_objects = create_data_objects(schema, config)
+    model = instantiate_model(schema, config, device)
 
     training_config = config["training"]
     optimizer = torch.optim.AdamW(
@@ -227,10 +183,10 @@ def train_model(
             if max_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             optimizer.step()
-            train_losses.append(loss.item())
+            train_losses.append(float(loss.item()))
 
         train_loss = float(np.mean(train_losses))
-        valid_loss, valid_metrics = evaluate(model, data_objects["loaders"]["valid"], device)
+        valid_loss, valid_metrics = evaluate_model(model, data_objects["loaders"]["valid"], device)
         scheduler.step(valid_metrics["auc"])
 
         writer.add_scalar("loss/train", train_loss, epoch)
@@ -253,7 +209,7 @@ def train_model(
         )
 
         if valid_metrics["auc"] > best_auc:
-            best_auc = valid_metrics["auc"]
+            best_auc = float(valid_metrics["auc"])
             epochs_without_improvement = 0
             best_state = {
                 "epoch": epoch,
@@ -297,46 +253,37 @@ def train_model(
     )
     writer.close()
     print(f"Saved checkpoints to: {checkpoint_dir / 'best_model.pt'} and {checkpoint_dir / 'final_model.pt'}")
+    return {
+        "schema": schema,
+        "checkpoint_path": checkpoint_dir / "best_model.pt",
+        "best_valid_auc": best_auc,
+        "history": history,
+    }
 
 
-def main() -> None:
-    args = parse_args()
-    config_path = Path(args.config).resolve()
-    repo_root = Path(__file__).resolve().parents[1]
-    sys.path.insert(0, str(repo_root))
-
-    config = load_config(config_path)
-    set_runtime_environment(config)
-
+def run_evaluation(
+    config: dict[str, Any],
+    repo_root: Path,
+    device: "torch.device",
+    *,
+    checkpoint_path: Path | None = None,
+    split: str = "valid",
+) -> dict[str, Any]:
     import torch
 
-    seed_everything(int(config["training"]["seed"]))
-    device = validate_device(config)
+    if split != "valid":
+        raise ValueError("TAAC2026 evaluation currently supports split='valid' only.")
 
-    schema = maybe_prepare_features(config, repo_root, args.force_prepare)
-    print(
-        json.dumps(
-            {
-                "raw_data": config["paths"]["raw_data"],
-                "target_action_type": config["data"]["target_action_type"],
-                "num_dense_features": len(schema["dense_features"]),
-                "num_sparse_features": len(schema["sparse_features"]),
-                "embed_dim": config["training"]["embed_dim"],
-                "hidden_units": config["training"]["hidden_units"],
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
-
-    if args.prepare_only:
-        print("Feature preparation completed.")
-        return
-
-    data_objects = create_dataloaders(schema, config, repo_root)
+    schema = maybe_prepare_features(config, repo_root, force_prepare=False)
+    data_objects = create_data_objects(schema, config)
     model = instantiate_model(schema, config, device)
-    train_model(model, schema, config, data_objects, device, repo_root)
 
-
-if __name__ == "__main__":
-    main()
+    if checkpoint_path is None:
+        checkpoint_path = resolve_workspace_path(repo_root, config["paths"]["checkpoint_dir"]) / "best_model.pt"
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    loss, metrics = evaluate_model(model, data_objects["loaders"][split], device)
+    print(f"Checkpoint: {checkpoint_path}")
+    print(f"{split}_loss={loss:.6f}")
+    print(format_metrics(split, metrics))
+    return {"loss": loss, "metrics": metrics, "checkpoint_path": checkpoint_path}

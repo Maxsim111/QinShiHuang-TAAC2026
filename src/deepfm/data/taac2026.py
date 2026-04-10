@@ -9,9 +9,11 @@ import numpy as np
 import pandas as pd
 import torch
 import yaml
-from sklearn.metrics import accuracy_score, log_loss, roc_auc_score
 from torch.utils.data import Dataset
 from tqdm import tqdm
+
+from deepfm.common.runtime import resolve_workspace_path
+from deepfm.eval.classification import compute_classification_metrics, format_metrics
 
 
 FEATURE_KIND_DENSE = "dense"
@@ -38,11 +40,6 @@ def dump_json(path: Path, data: dict[str, Any]) -> None:
 def ensure_directory(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
-
-
-def resolve_workspace_path(repo_root: Path, raw_path: str) -> Path:
-    path = Path(raw_path)
-    return path if path.is_absolute() else (repo_root.parent / path).resolve()
 
 
 def normalize_sparse_value(value: Any) -> str:
@@ -538,24 +535,3 @@ class ParquetDataset(Dataset):
         sparse_x = torch.from_numpy(self.sparse[index])
         label = torch.tensor(self.labels[index], dtype=torch.float32)
         return dense_x, sparse_x, label
-
-
-def compute_classification_metrics(labels: np.ndarray, probabilities: np.ndarray) -> dict[str, float]:
-    labels = labels.astype(np.float32)
-    probabilities = probabilities.astype(np.float32)
-    predictions = (probabilities >= 0.5).astype(np.int32)
-    metrics = {
-        "accuracy": float(accuracy_score(labels, predictions)),
-        "logloss": float(log_loss(labels, probabilities, labels=[0, 1])),
-    }
-    metrics["auc"] = float(roc_auc_score(labels, probabilities)) if np.unique(labels).size > 1 else float("nan")
-    return metrics
-
-
-def format_metrics(prefix: str, metrics: dict[str, float]) -> str:
-    return (
-        f"{prefix} "
-        f"AUC={metrics['auc']:.6f} "
-        f"LogLoss={metrics['logloss']:.6f} "
-        f"Accuracy={metrics['accuracy']:.6f}"
-    )

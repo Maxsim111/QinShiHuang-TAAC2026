@@ -1,3 +1,5 @@
+task: taac2026
+
 paths:
   raw_data: local_workspace/datasets/TAAC2026/data_sample_1000/raw/sample_data.parquet
   feature_dir: local_workspace/outputs/taac2026/deepfm/features

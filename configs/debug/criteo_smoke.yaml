@@ -1,0 +1,21 @@
+_base_: ../base/criteo.yaml
+
+paths:
+  feature_dir: local_workspace/outputs/criteo/debug_smoke/features
+  log_dir: local_workspace/logs/criteo/debug_smoke
+  checkpoint_dir: local_workspace/checkpoints/criteo/debug_smoke
+
+data:
+  num_samples: 4096
+  chunk_size: 1024
+  hash_bucket_size: 1024
+  reuse_cache: false
+
+training:
+  batch_size: 256
+  eval_batch_size: 512
+  epochs: 1
+  embed_dim: 4
+  hidden_units: [32, 16]
+  mixed_precision: false
+  log_interval: 4

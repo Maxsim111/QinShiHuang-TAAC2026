@@ -1,0 +1,6 @@
+_base_: ../base/criteo.yaml
+
+training:
+  embed_dim: 16
+  hidden_units: [512, 256, 128]
+  dropout: 0.3

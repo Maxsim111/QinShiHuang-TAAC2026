@@ -1,0 +1,41 @@
+task: criteo
+
+paths:
+  raw_data: /media/shenyu/data/archive/dac/train.txt
+  feature_dir: local_workspace/outputs/criteo/deepfm/features
+  log_dir: local_workspace/logs/criteo/deepfm
+  checkpoint_dir: local_workspace/checkpoints/criteo/deepfm
+
+device:
+  cuda_visible_devices: "0"
+
+data:
+  num_samples: null
+  train_ratio: 0.9
+  valid_ratio: 0.1
+  chunk_size: 250000
+  sparse_encoding: hash
+  hash_bucket_size: 200000
+  reuse_cache: true
+  sparse_threshold: 20
+  max_vocab_size: null
+
+training:
+  seed: 2026
+  batch_size: 4096
+  eval_batch_size: 16384
+  epochs: 3
+  learning_rate: 0.0005
+  weight_decay: 1.0e-6
+  embed_dim: 8
+  hidden_units: [256, 128]
+  dropout: 0.2
+  early_stopping_patience: 2
+  lr_decay_factor: 0.5
+  lr_decay_patience: 1
+  use_pos_weight: false
+  max_grad_norm: 5.0
+  mixed_precision: true
+  amp_dtype: bfloat16
+  shuffle_block_rows: 262144
+  log_interval: 500

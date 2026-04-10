@@ -3,10 +3,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-try:
-    from .layer import FactorizationMachine, FeaturesEmbedding, FeaturesLinear, MLP
-except ImportError:
-    from layer import FactorizationMachine, FeaturesEmbedding, FeaturesLinear, MLP
+from .layers import FactorizationMachine, FeaturesEmbedding, FeaturesLinear, MLP
 
 
 class DeepFM(nn.Module):
