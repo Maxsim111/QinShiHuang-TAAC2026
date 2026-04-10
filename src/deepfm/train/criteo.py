@@ -9,6 +9,14 @@ from typing import Any
 import numpy as np
 import torch
 
+from deepfm.common.reporting import (
+    append_jsonl,
+    build_evaluation_report,
+    build_training_summary,
+    dump_json,
+    reset_jsonl,
+    write_history_csv,
+)
 from deepfm.common.runtime import resolve_workspace_path
 from deepfm.data.criteo import prepare_criteo_dataset
 from deepfm.models import DeepFM
@@ -132,8 +140,16 @@ def run_training(
     )
 
     checkpoint_dir = resolve_workspace_path(repo_root, config["paths"]["checkpoint_dir"])
+    log_dir = resolve_workspace_path(repo_root, config["paths"]["log_dir"])
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    history_jsonl_path = log_dir / "train_history.jsonl"
+    history_csv_path = log_dir / "train_history.csv"
+    summary_path = log_dir / "train_summary.json"
+    reset_jsonl(history_jsonl_path)
     best_auc = -math.inf
+    best_epoch: int | None = None
+    best_metrics: dict[str, float] = {}
     patience_cnt = 0
     patience = int(tc["early_stopping_patience"])
     batch_size = int(tc["batch_size"])
@@ -191,18 +207,22 @@ def run_training(
             f"val_loss={val_loss:.6f} AUC={val_metrics['auc']:.6f} "
             f"LogLoss={val_metrics['logloss']:.6f} Acc={val_metrics['accuracy']:.4f} lr={lr:.2e}"
         )
-        history.append(
-            {
-                "epoch": epoch,
-                "train_loss": train_loss,
-                "valid_loss": val_loss,
-                **{f"valid_{key}": float(value) for key, value in val_metrics.items()},
-            }
-        )
+
+        epoch_record = {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "valid_loss": val_loss,
+            "lr": float(lr),
+            **{f"valid_{key}": float(value) for key, value in val_metrics.items()},
+            "is_best": False,
+        }
 
         if val_metrics["auc"] > best_auc:
             best_auc = float(val_metrics["auc"])
+            best_epoch = epoch
+            best_metrics = {key: float(value) for key, value in val_metrics.items()}
             patience_cnt = 0
+            epoch_record["is_best"] = True
             torch.save(
                 {
                     "epoch": epoch,
@@ -217,11 +237,49 @@ def run_training(
         else:
             patience_cnt += 1
             if patience_cnt >= patience:
+                epoch_record["early_stopping_triggered"] = True
+                history.append(epoch_record)
+                append_jsonl(history_jsonl_path, epoch_record)
+                write_history_csv(history_csv_path, history)
+                dump_json(
+                    summary_path,
+                    build_training_summary(
+                        task="criteo",
+                        config=config,
+                        history=history,
+                        checkpoint_path=checkpoint_dir / "best_model.pt",
+                        best_epoch=best_epoch,
+                        best_metrics=best_metrics,
+                        extra={"stopped_early": True},
+                    ),
+                )
                 print(f"Early stopping at epoch {epoch}.")
                 break
 
+        history.append(epoch_record)
+        append_jsonl(history_jsonl_path, epoch_record)
+        write_history_csv(history_csv_path, history)
+
     print(f"Best valid AUC: {best_auc:.6f}")
     print(f"Checkpoint saved to: {checkpoint_dir / 'best_model.pt'}")
+    dump_json(
+        summary_path,
+        build_training_summary(
+            task="criteo",
+            config=config,
+            history=history,
+            checkpoint_path=checkpoint_dir / "best_model.pt",
+            best_epoch=best_epoch,
+            best_metrics=best_metrics,
+            extra={
+                "artifacts": {
+                    "history_jsonl": str(history_jsonl_path),
+                    "history_csv": str(history_csv_path),
+                    "summary_json": str(summary_path),
+                }
+            },
+        ),
+    )
     return {
         "schema": schema,
         "checkpoint_path": checkpoint_dir / "best_model.pt",
@@ -264,6 +322,19 @@ def run_evaluation(
     model.load_state_dict(checkpoint["model_state_dict"])
 
     loss, metrics = evaluate_model(model, datasets[split], device, config, amp_ctx, criterion)
+    log_dir = resolve_workspace_path(repo_root, config["paths"]["log_dir"])
+    report_path = log_dir / "evaluations" / f"{split}_{checkpoint_path.stem}.json"
+    dump_json(
+        report_path,
+        build_evaluation_report(
+            task="criteo",
+            split=split,
+            config=config,
+            checkpoint_path=checkpoint_path,
+            loss=loss,
+            metrics=metrics,
+        ),
+    )
     print(f"Checkpoint: {checkpoint_path}")
     print(f"{split}_loss={loss:.6f}")
     print(
@@ -272,4 +343,5 @@ def run_evaluation(
         f"LogLoss={metrics['logloss']:.6f} "
         f"Accuracy={metrics['accuracy']:.6f}"
     )
-    return {"loss": loss, "metrics": metrics, "checkpoint_path": checkpoint_path}
+    print(f"Saved evaluation report to: {report_path}")
+    return {"loss": loss, "metrics": metrics, "checkpoint_path": checkpoint_path, "report_path": report_path}

@@ -12,7 +12,7 @@ Source of truth for work log: `docs/log.md`
 - `scripts/`: reproducible entrypoints for prepare, train, evaluate, and smoke tests
 - `docs/`: stable project context and short work log
 - `checks/`: lightweight guidance checks
-- `DeepInterestNetwork/`: legacy reference code kept as archive
+- `legacy/`: archived reference code that is no longer part of the active framework
 
 ## Quick Start
 

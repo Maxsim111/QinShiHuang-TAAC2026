@@ -32,6 +32,14 @@ TAAC2026 remains the secondary task and uses the same framework structure with i
 - Full Criteo runs must avoid loading the entire dataset into RAM; memmap caching is the trusted path.
 - Generated outputs belong in `local_workspace/` and should stay out of git.
 
+## Training Outputs
+
+- Epoch-level training records are written to `local_workspace/logs/.../train_history.jsonl`
+- The same history is exported as `local_workspace/logs/.../train_history.csv`
+- Run-level summaries are written to `local_workspace/logs/.../train_summary.json`
+- Validation reports from `scripts/evaluate.py` are written to `local_workspace/logs/.../evaluations/*.json`
+- Best checkpoints remain in `local_workspace/checkpoints/.../best_model.pt`
+
 ## Repo Structure
 
 - `configs/`: tracked base, experiment, and debug configs
@@ -42,4 +50,5 @@ TAAC2026 remains the secondary task and uses the same framework structure with i
 - `src/deepfm/common/`: shared config and runtime helpers
 - `scripts/`: reproducible prepare, train, evaluate, and smoke-test entrypoints
 - `docs/`: stable project context and short work log
+- `legacy/`: archived historical code that should not receive new development work
 - `local_workspace/`: ignored training artifacts and caches
